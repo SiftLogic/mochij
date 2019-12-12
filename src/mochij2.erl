@@ -1,5 +1,23 @@
 %% @author Bob Ippolito <bob@mochimedia.com>
 %% @copyright 2007 Mochi Media, Inc.
+%%
+%% Permission is hereby granted, free of charge, to any person obtaining a
+%% copy of this software and associated documentation files (the "Software"),
+%% to deal in the Software without restriction, including without limitation
+%% the rights to use, copy, modify, merge, publish, distribute, sublicense,
+%% and/or sell copies of the Software, and to permit persons to whom the
+%% Software is furnished to do so, subject to the following conditions:
+%%
+%% The above copyright notice and this permission notice shall be included in
+%% all copies or substantial portions of the Software.
+%%
+%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+%% THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+%% FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+%% DEALINGS IN THE SOFTWARE.
 
 %% @doc Yet another JSON (RFC 4627) library for Erlang. mochijson2 works
 %%      with binaries as strings, arrays as lists (without an {array, _})
@@ -64,6 +82,8 @@
 -define(IS_WHITESPACE(C),
         (C =:= $\s orelse C =:= $\t orelse C =:= $\r orelse C =:= $\n)).
 
+-define(IS_MAP(X), is_map(X)).
+
 %% @type json_string() = atom | binary()
 %% @type json_number() = integer() | float()
 %% @type json_array() = [json_term()]
@@ -106,10 +126,11 @@ decoder(Options) ->
     State = parse_decoder_options(Options, #decoder{}),
     fun (O) -> json_decode(O, State) end.
 
-%% @spec decode(iolist(), [{format, proplist | eep18 | struct}]) -> json_term()
+%% @spec decode(iolist(), [{format, proplist | eep18 | struct | map}]) -> json_term()
 %% @doc Decode the given iolist to Erlang terms using the given object format
 %%      for decoding, where proplist returns JSON objects as [{binary(), json_term()}]
-%%      proplists, eep18 returns JSON objects as {[binary(), json_term()]}, and struct
+%%      proplists, eep18 returns JSON objects as {[binary(), json_term()]},
+%%      map returns JSON objects as #{binary() => json_term()}, and struct
 %%      returns them as-is.
 decode(S, Options) ->
     json_decode(S, parse_decoder_options(Options, #decoder{})).
@@ -132,9 +153,15 @@ parse_decoder_options([], State) ->
     State;
 parse_decoder_options([{object_hook, Hook} | Rest], State) ->
     parse_decoder_options(Rest, State#decoder{object_hook=Hook});
+parse_decoder_options([{format, map} | Rest], State) ->
+    Hook = make_object_hook_for_map(),
+    parse_decoder_options(Rest, State#decoder{object_hook=Hook});
 parse_decoder_options([{format, Format} | Rest], State)
   when Format =:= struct orelse Format =:= eep18 orelse Format =:= proplist ->
     parse_decoder_options(Rest, State#decoder{object_hook=Format}).
+
+make_object_hook_for_map() ->
+    fun ({struct, P}) -> maps:from_list(P) end.
 
 json_encode(true, _State) ->
     <<"true">>;
@@ -162,6 +189,8 @@ json_encode(Array, State) when is_list(Array) ->
     json_encode_array(Array, State);
 json_encode({array, Array}, State) when is_list(Array) ->
     json_encode_array(Array, State);
+json_encode(M, State) when ?IS_MAP(M) ->
+    json_encode_map(M, State);
 json_encode({json, IoList}, _State) ->
     IoList;
 json_encode(Bad, #encoder{handler=null}) ->
@@ -189,20 +218,25 @@ json_encode_proplist(Props, State) ->
     [$, | Acc1] = lists:foldl(F, "{", Props),
     lists:reverse([$\} | Acc1]).
 
+json_encode_map(Map, _State) when map_size(Map) =:= 0 ->
+    <<"{}">>;
+json_encode_map(Map, State) ->
+    F = fun(K, V, Acc) ->
+                KS = json_encode_string(K, State),
+                VS = json_encode(V, State),
+                [$,, VS, $:, KS | Acc]
+          end,
+    [$, | Acc1] = maps:fold(F, "{", Map),
+    lists:reverse([$\} | Acc1]).
+
 json_encode_string(A, State) when is_atom(A) ->
-    L = atom_to_list(A),
-    case json_string_is_safe(L) of
-        true ->
-            [?Q, L, ?Q];
-        false ->
-            json_encode_string_unicode(xmerl_ucs:from_utf8(L), State, [?Q])
-    end;
+    json_encode_string(atom_to_binary(A, latin1), State);
 json_encode_string(B, State) when is_binary(B) ->
     case json_bin_is_safe(B) of
         true ->
             [?Q, B, ?Q];
         false ->
-            json_encode_string_unicode(xmerl_ucs:from_utf8(B), State, [?Q])
+            json_encode_string_unicode(unicode:characters_to_list(B), State, [?Q])
     end;
 json_encode_string(I, _State) when is_integer(I) ->
     [?Q, integer_to_list(I), ?Q];
@@ -237,7 +271,7 @@ json_string_is_safe([C | Rest]) ->
         C when C < 16#7f ->
             json_string_is_safe(Rest);
         _ ->
-            false
+            exit({json_encode, {bad_char, C}})
     end.
 
 json_bin_is_safe(<<>>) ->
@@ -295,12 +329,13 @@ json_encode_string_unicode([C | Cs], State, Acc) ->
                C when C >= 0, C < $\s ->
                    [unihex(C) | Acc];
                C when C >= 16#7f, C =< 16#10FFFF, State#encoder.utf8 ->
-                   [xmerl_ucs:to_utf8(C) | Acc];
+                   [unicode:characters_to_binary([C]) | Acc];
                C when  C >= 16#7f, C =< 16#10FFFF, not State#encoder.utf8 ->
                    [unihex(C) | Acc];
                C when C < 16#7f ->
                    [C | Acc];
                _ ->
+                   %% json_string_is_safe guarantees that this branch is dead
                    exit({json_encode, {bad_char, C}})
            end,
     json_encode_string_unicode(Cs, State, Acc1).
@@ -455,27 +490,29 @@ tokenize_string(B, S=#decoder{offset=O}, Acc) ->
                 %% coalesce UTF-16 surrogate pair
                 <<"\\u", D3, D2, D1, D0, _/binary>> = Rest,
                 D = erlang:list_to_integer([D3,D2,D1,D0], 16),
-                [CodePoint] = xmerl_ucs:from_utf16be(<<C:16/big-unsigned-integer,
-                    D:16/big-unsigned-integer>>),
-                Acc1 = lists:reverse(xmerl_ucs:to_utf8(CodePoint), Acc),
+                Acc1 = [unicode:characters_to_binary(
+                    <<C:16/big-unsigned-integer,
+                        D:16/big-unsigned-integer>>,
+                    utf16)
+                    | Acc],
                 tokenize_string(B, ?ADV_COL(S, 12), Acc1);
-            true ->
-                Acc1 = lists:reverse(xmerl_ucs:to_utf8(C), Acc),
-                tokenize_string(B, ?ADV_COL(S, 6), Acc1)
+                true ->
+                    Acc1 = [unicode:characters_to_binary([C]) | Acc],
+                    tokenize_string(B, ?ADV_COL(S, 6), Acc1)
             end;
         <<_:O/binary, C1, _/binary>> when C1 < 128 ->
             tokenize_string(B, ?INC_CHAR(S, C1), [C1 | Acc]);
         <<_:O/binary, C1, C2, _/binary>> when C1 >= 194, C1 =< 223,
-                C2 >= 128, C2 =< 191 ->
+            C2 >= 128, C2 =< 191 ->
             tokenize_string(B, ?ADV_COL(S, 2), [C2, C1 | Acc]);
         <<_:O/binary, C1, C2, C3, _/binary>> when C1 >= 224, C1 =< 239,
-                C2 >= 128, C2 =< 191,
-                C3 >= 128, C3 =< 191 ->
+            C2 >= 128, C2 =< 191,
+            C3 >= 128, C3 =< 191 ->
             tokenize_string(B, ?ADV_COL(S, 3), [C3, C2, C1 | Acc]);
         <<_:O/binary, C1, C2, C3, C4, _/binary>> when C1 >= 240, C1 =< 244,
-                C2 >= 128, C2 =< 191,
-                C3 >= 128, C3 =< 191,
-                C4 >= 128, C4 =< 191 ->
+            C2 >= 128, C2 =< 191,
+            C3 >= 128, C3 =< 191,
+            C4 >= 128, C4 =< 191 ->
             tokenize_string(B, ?ADV_COL(S, 4), [C4, C3, C2, C1 | Acc]);
         _ ->
             throw(invalid_utf8)
@@ -696,13 +733,13 @@ e2j_test_vec(utf8) ->
 %% test utf8 encoding
 encoder_utf8_test() ->
     %% safe conversion case (default)
-    [34,"\\u0001","\\u0442","\\u0435","\\u0441","\\u0442",34] =
-        encode(<<1,"\321\202\320\265\321\201\321\202">>),
+    <<"\"\\u0001\\u0442\\u0435\\u0441\\u0442\"">> =
+        iolist_to_binary(encode(<<1,"\321\202\320\265\321\201\321\202">>)),
 
     %% raw utf8 output (optional)
     Enc = mochij2:encoder([{utf8, true}]),
-    [34,"\\u0001",[209,130],[208,181],[209,129],[209,130],34] =
-        Enc(<<1,"\321\202\320\265\321\201\321\202">>).
+    <<34,"\\u0001",209,130,208,181,209,129,209,130,34>> =
+        iolist_to_binary(Enc(<<1,"\321\202\320\265\321\201\321\202">>)).
 
 input_validation_test() ->
     Good = [
@@ -711,7 +748,7 @@ input_validation_test() ->
         {16#10196, <<?Q, 16#F0, 16#90, 16#86, 16#96, ?Q>>} %% denarius
     ],
     lists:foreach(fun({CodePoint, UTF8}) ->
-        Expect = list_to_binary(xmerl_ucs:to_utf8(CodePoint)),
+        Expect = unicode:characters_to_binary([CodePoint]),
         Expect = decode(UTF8)
     end, Good),
 
@@ -746,7 +783,7 @@ inline_json_test() ->
     ok.
 
 big_unicode_test() ->
-    UTF8Seq = list_to_binary(xmerl_ucs:to_utf8(16#0001d120)),
+    UTF8Seq = unicode:characters_to_binary([16#0001d120]),
     ?assertEqual(
        <<"\"\\ud834\\udd20\"">>,
        iolist_to_binary(encode(UTF8Seq))),
@@ -778,7 +815,10 @@ atom_test() ->
        iolist_to_binary(encode(foo))),
     ?assertEqual(
        <<"\"\\ud834\\udd20\"">>,
-       iolist_to_binary(encode(list_to_atom(xmerl_ucs:to_utf8(16#0001d120))))),
+        iolist_to_binary(
+            encode(
+                binary_to_atom(
+                    unicode:characters_to_binary([16#0001d120]), latin1)))),
     ok.
 
 key_encode_test() ->
@@ -823,18 +863,21 @@ unsafe_chars_test() ->
        json_string_is_safe([16#0001d120])),
     ?assertEqual(
        false,
-       json_bin_is_safe(list_to_binary(xmerl_ucs:to_utf8(16#0001d120)))),
+        json_bin_is_safe(unicode:characters_to_binary([16#0001d120]))),
     ?assertEqual(
        [16#0001d120],
-       xmerl_ucs:from_utf8(
-         binary_to_list(
-           decode(encode(list_to_atom(xmerl_ucs:to_utf8(16#0001d120))))))),
+        unicode:characters_to_list(
+            decode(
+                encode(
+                    binary_to_atom(
+                        unicode:characters_to_binary([16#0001d120]),
+                        latin1))))),
     ?assertEqual(
        false,
-       json_string_is_safe([16#110000])),
+        json_string_is_safe([16#10ffff])),
     ?assertEqual(
        false,
-       json_bin_is_safe(list_to_binary(xmerl_ucs:to_utf8([16#110000])))),
+        json_bin_is_safe(unicode:characters_to_binary([16#10ffff]))),
     %% solidus can be escaped but isn't unsafe by default
     ?assertEqual(
        <<"/">>,
@@ -890,5 +933,53 @@ format_test_() ->
      || {F, A} <- [{struct, {struct, P}},
                    {eep18, {P}},
                    {proplist, P}]].
+
+array_test() ->
+    A = [<<"hello">>],
+    ?assertEqual(A, decode(encode({array, A}))).
+
+bad_char_test() ->
+    ?assertEqual(
+        {'EXIT', {json_encode, {bad_char, 16#110000}}},
+        catch json_string_is_safe([16#110000])).
+
+utf8_roundtrip_test_() ->
+    %% These are the boundary cases for UTF8 encoding
+    Codepoints = [%% 7 bits  -> 1 byte
+        16#00, 16#7f,
+        %% 11 bits -> 2 bytes
+        16#080, 16#07ff,
+        %% 16 bits -> 3 bytes
+        16#0800, 16#ffff,
+        16#d7ff, 16#e000,
+        %% 21 bits -> 4 bytes
+        16#010000, 16#10ffff],
+    UTF8 = unicode:characters_to_binary(Codepoints),
+    Encode = encoder([{utf8, true}]),
+    [{"roundtrip escaped",
+        ?_assertEqual(UTF8, decode(encode(UTF8)))},
+        {"roundtrip utf8",
+            ?_assertEqual(UTF8, decode(Encode(UTF8)))}].
+
+utf8_non_character_test_() ->
+    S = unicode:characters_to_binary([16#ffff, 16#fffe]),
+    [{"roundtrip escaped", ?_assertEqual(S, decode(encode(S)))},
+        {"roundtrip utf8", ?_assertEqual(S, decode((encoder([{utf8, true}]))(S)))}].
+
+-ifndef(map_unavailable).
+
+decode_map_test() ->
+    Json = "{\"var1\": 3, \"var2\": {\"var3\": 7}}",
+    M = #{<<"var1">> => 3,<<"var2">> => #{<<"var3">> => 7}},
+    ?assertEqual(M, decode(Json, [{format, map}])).
+
+encode_map_test() ->
+    M = <<"{\"a\":1,\"b\":{\"c\":2}}">>,
+    ?assertEqual(M, iolist_to_binary(encode(#{a => 1, b => #{ c => 2}}))).
+
+encode_empty_map_test() ->
+    ?assertEqual(<<"{}">>, encode(#{})).
+
+-endif.
 
 -endif.
