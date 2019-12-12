@@ -1,0 +1,14 @@
+{application, mochij,
+ [{description, "Json utils from Mochiweb"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, [mochij, mochij2, mochinum]},
+
+  {licenses, ["MIT"]},
+  {links, ["http://github.com/mochi/mochiweb"]}
+ ]}.
