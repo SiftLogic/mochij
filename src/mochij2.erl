@@ -138,7 +138,7 @@ decode(S, Options) ->
 %% @spec decode(iolist()) -> json_term()
 %% @doc Decode the given iolist to Erlang terms.
 decode(S) ->
-    json_decode(S, #decoder{}).
+    json_decode(S, #decoder{object_hook=proplist}).
 
 %% Internal API
 
