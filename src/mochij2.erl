@@ -94,7 +94,7 @@
 %%                     json_object() | json_eep18_object() | json_iolist()
 
 -record(encoder, {handler=null,
-                  utf8=false}).
+                  utf8=true}).
 
 -record(decoder, {object_hook=null,
                   offset=0,
@@ -113,12 +113,12 @@ encoder(Options) ->
 %% @spec encode(json_term()) -> iolist()
 %% @doc Encode the given as JSON to an iolist.
 encode(Any) ->
-    json_encode(Any, #encoder{}).
+    unicode:characters_to_binary(json_encode(Any, #encoder{utf8 = true})).
 
 %% @spec encode_utf8(json_term()) -> iolist()
 %% @doc Encode the given as JSON to an iolist.
 encode_utf8(Any) ->
-  json_encode(Any, #encoder{utf8 = true}).
+  unicode:characters_to_binary(json_encode(Any, #encoder{utf8 = true})).
 
 %% @spec decoder([decoder_option()]) -> function()
 %% @doc Create a decoder/1 with the given options.
